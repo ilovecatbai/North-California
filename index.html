@@ -448,8 +448,8 @@
   const state = {
     view:'station',
     focusRoute: null,
-    activeStations: new Set(STATION_KEYS),
-    activeDsps: new Set(DSP_KEYS),
+    activeStations: new Set(),
+    activeDsps: new Set(),
     focusStation: defaultFocus,
   };
 
@@ -467,6 +467,26 @@
 
   function fmt(n){ return Math.round(n).toLocaleString('en-US'); }
   function fmtPrice(n){ return '$'+n.toFixed(2); }
+  // empty active-set == ALL shown (default)
+  function stationOn(s){ return state.activeStations.size===0 || state.activeStations.has(s); }
+  function dspOn(d){ return state.activeDsps.size===0 || state.activeDsps.has(d); }
+  // per-station DSP share (% of station volume), descending
+  const STATION_DSP = {};
+  STATION_KEYS.forEach(s=>{
+    const zips = STATIONS[s].zips;
+    const tot = STATIONS[s].total_volume || zips.reduce((a,z)=>a+z.volume,0);
+    const byDsp = {};
+    zips.forEach(z=>Object.entries(z.dsps).forEach(([d,v])=>{ byDsp[d]=(byDsp[d]||0)+v; }));
+    let arr;
+    if(tot>0){ arr = Object.entries(byDsp).map(([d,v])=>({dsp:d, vol:v, pct:v/tot*100})); }
+    else {
+      const cnt={}; zips.forEach(z=>Object.keys(z.dsps).forEach(d=>cnt[d]=(cnt[d]||0)+1));
+      const zc=zips.length||1;
+      arr = Object.entries(cnt).map(([d,c])=>({dsp:d, vol:0, pct:c/zc*100}));
+    }
+    arr.sort((a,b)=>b.pct-a.pct);
+    STATION_DSP[s]=arr;
+  });
 
   // ---------- Zip styling ----------
   function zipStyleFor(rec){
@@ -483,7 +503,7 @@
     if(state.view==='routes'){
       return rec.station === state.focusStation;
     }
-    return state.activeStations.has(rec.station) && state.activeDsps.has(rec.dominantDsp);
+    return stationOn(rec.station) && dspOn(rec.dominantDsp);
   }
 
   function styleFeature(feature){
@@ -627,7 +647,7 @@
     STATION_KEYS.forEach(st=>{
       const info = STATIONS[st];
       if(!info.lat || !info.lon) return;
-      if(!state.activeStations.has(st)) return;
+      if(!stationOn(st)) return;
       const m = L.marker([info.lat, info.lon], {icon: stationIcon(st), zIndexOffset:1000});
       m.bindPopup(stationPopupHtml(st), {maxWidth:290});
       m.on('click', ()=> highlightStation(st));
@@ -658,12 +678,12 @@
     el.style.display = '';
     if(state.view==='station'){
       el.innerHTML = `<div class="lg-title">Station</div>` +
-        STATION_KEYS.filter(s=>state.activeStations.has(s)).map(s=>
+        STATION_KEYS.filter(s=>stationOn(s)).map(s=>
           `<div class="lg-cat"><span class="sw" style="background:${STATION_COLORS[s]}"></span>${s} · ${fmt(STATIONS[s].total_volume)}/d</div>`
         ).join('');
     } else if(state.view==='dsp'){
       el.innerHTML = `<div class="lg-title">Dominant DSP per ZIP</div>` +
-        DSP_KEYS.filter(d=>state.activeDsps.has(d)).map(d=>
+        DSP_KEYS.filter(d=>dspOn(d)).map(d=>
           `<div class="lg-cat"><span class="sw" style="background:${DSP_COLORS[d]}"></span>${d}</div>`
         ).join('');
     } else if(state.view==='volume'){
@@ -737,7 +757,17 @@
     const titleEl = document.getElementById('ranklist-title');
     const el = document.getElementById('ranklist');
     let rows = [];
-    if(state.view==='station' || state.view==='volume'){
+    const singleStation = (state.activeStations.size===1) ? [...state.activeStations][0] : null;
+    if(singleStation && state.view!=='routes'){
+      titleEl.textContent = `DSP volume share · ${singleStation}`;
+      const arr = STATION_DSP[singleStation] || [];
+      rows = arr.map(x=>({
+        key:x.dsp, label:x.dsp, val:x.pct,
+        display: fmt(x.vol)+'/d · '+x.pct.toFixed(1)+'%',
+        color: DSP_COLORS[x.dsp]||'#888',
+        pct: x.pct, kind:'stdsp', selected: dspOn(x.dsp)
+      }));
+    } else if(state.view==='station' || state.view==='volume'){
       titleEl.textContent = 'Stations by volume';
       const max = Math.max(...STATION_KEYS.map(s=>STATIONS[s].total_volume));
       rows = STATION_KEYS.slice().sort((a,b)=>STATIONS[b].total_volume-STATIONS[a].total_volume).map(s=>({
@@ -769,7 +799,7 @@
       }));
     }
     el.innerHTML = rows.map(r=>`
-      <div class="rank-row" data-kind="${r.kind}" data-key="${r.key}">
+      <div class="rank-row" data-kind="${r.kind}" data-key="${r.key}" style="${r.selected===false?'opacity:.4;':''}">
         <div class="rank-top"><span class="name"><span style="width:7px;height:7px;border-radius:50%;background:${r.color};display:inline-block;"></span>${r.label}</span><span class="val mono">${r.display}</span></div>
         <div class="rank-bar-bg"><div class="rank-bar-fill" style="width:${r.pct}%; background:${r.color};"></div></div>
       </div>
@@ -778,7 +808,15 @@
       row.addEventListener('click', ()=>{
         const key = row.getAttribute('data-key');
         const kind = row.getAttribute('data-kind');
-        if(kind==='station'){ highlightStation(key); const st=STATIONS[key]; if(st.lat&&st.lon) setTimeout(()=>{}, 0); }
+        if(kind==='stdsp'){
+          if(state.activeDsps.has(key)) state.activeDsps.delete(key); else state.activeDsps.add(key);
+          refreshAll(); return;
+        }
+        if(kind==='station'){
+          if(state.activeStations.has(key) && state.activeStations.size===1){ state.activeStations = new Set(); }
+          else { state.activeStations = new Set([key]); state.activeDsps = new Set(); }
+          refreshAll(); highlightStation(key);
+        }
         else if(kind==='route'){
           const pts = [];
           Object.values(ZIP_INDEX).forEach(z=>{
@@ -800,32 +838,41 @@
   function renderChips(){
     const stEl = document.getElementById('station-chips');
     stEl.innerHTML = STATION_KEYS.map(s=>{
-      const on = state.activeStations.has(s);
+      const on = stationOn(s);
       return `<div class="chip ${on?'':'off'}" data-st="${s}"><span class="sw" style="background:${STATION_COLORS[s]}"></span>${s}</div>`;
     }).join('');
     stEl.querySelectorAll('.chip').forEach(c=>{
       c.addEventListener('click', ()=>{
         const s = c.getAttribute('data-st');
-        if(state.activeStations.has(s)) state.activeStations.delete(s); else state.activeStations.add(s);
+        if(state.activeStations.has(s) && state.activeStations.size===1){ state.activeStations = new Set(); }
+        else { state.activeStations = new Set([s]); state.activeDsps = new Set(); }
         refreshAll();
       });
     });
 
+    const singleStation = state.activeStations.size===1 ? [...state.activeStations][0] : null;
+    const stDsps = singleStation ? new Set((STATION_DSP[singleStation]||[]).map(x=>x.dsp)) : null;
     const dspEl = document.getElementById('dsp-chips');
     dspEl.innerHTML = DSP_KEYS.map(d=>{
-      const on = state.activeDsps.has(d);
-      return `<div class="chip ${on?'':'off'}" data-dsp="${d}"><span class="sw" style="background:${DSP_COLORS[d]}"></span>${d}</div>`;
+      const inStation = !stDsps || stDsps.has(d);
+      const on = inStation && dspOn(d);
+      return `<div class="chip ${on?'':'off'}" data-dsp="${d}" ${!inStation?'data-disabled="1" style="opacity:.25;cursor:default;"':''}><span class="sw" style="background:${DSP_COLORS[d]}"></span>${d}</div>`;
     }).join('');
     dspEl.querySelectorAll('.chip').forEach(c=>{
       c.addEventListener('click', ()=>{
+        if(c.getAttribute('data-disabled')) return;
         const d = c.getAttribute('data-dsp');
         if(state.activeDsps.has(d)) state.activeDsps.delete(d); else state.activeDsps.add(d);
         refreshAll();
       });
     });
 
-    document.getElementById('stcount-lbl').textContent = `(${state.activeStations.size}/${STATION_KEYS.length})`;
-    document.getElementById('dspcount-lbl').textContent = `(${state.activeDsps.size}/${DSP_KEYS.length})`;
+    const stSel = state.activeStations.size===0 ? STATION_KEYS.length : state.activeStations.size;
+    let dspSel;
+    if(stDsps){ dspSel = state.activeDsps.size===0 ? stDsps.size : [...state.activeDsps].filter(d=>stDsps.has(d)).length; }
+    else { dspSel = state.activeDsps.size===0 ? DSP_KEYS.length : state.activeDsps.size; }
+    document.getElementById('stcount-lbl').textContent = `(${stSel}/${STATION_KEYS.length})`;
+    document.getElementById('dspcount-lbl').textContent = `(${dspSel}/${DSP_KEYS.length})`;
 
     const dimmed = state.view === 'routes';
     document.getElementById('station-filter-section').style.opacity = dimmed ? 0.4 : 1;
@@ -848,15 +895,15 @@
   function renderTopStats(){
     let totalVol = 0, zipCount = 0;
     STATION_KEYS.forEach(s=>{
-      if(!state.activeStations.has(s)) return;
+      if(!stationOn(s)) return;
       STATIONS[s].zips.forEach(z=>{
-        if(!state.activeDsps.has(Object.entries(z.dsps).sort((a,b)=>b[1]-a[1])[0]?.[0])) return;
+        if(!dspOn(Object.entries(z.dsps).sort((a,b)=>b[1]-a[1])[0]?.[0])) return;
         totalVol += z.volume; zipCount++;
       });
     });
     document.getElementById('stat-volume').textContent = fmt(totalVol);
     document.getElementById('stat-zips').textContent = zipCount;
-    document.getElementById('stat-stations').textContent = state.activeStations.size;
+    document.getElementById('stat-stations').textContent = state.activeStations.size===0 ? STATION_KEYS.length : state.activeStations.size;
   }
 
   function refreshAll(){
@@ -875,8 +922,8 @@
       const zoomHint = map.getZoom() < 8 ? ' · zoom in to reveal route number labels' : '';
       document.getElementById('filterlabel').textContent = `· ${STATIONS[state.focusStation].routes.length} routes shown, other stations dimmed${zoomHint}`;
     } else {
-      const hiddenSt = STATION_KEYS.length - state.activeStations.size;
-      const hiddenDsp = DSP_KEYS.length - state.activeDsps.size;
+      const hiddenSt = state.activeStations.size===0 ? 0 : STATION_KEYS.length - state.activeStations.size;
+      const hiddenDsp = state.activeDsps.size===0 ? 0 : DSP_KEYS.length - state.activeDsps.size;
       document.getElementById('filterlabel').textContent = (hiddenSt||hiddenDsp) ? `· ${hiddenSt} station(s), ${hiddenDsp} DSP(s) hidden` : '';
     }
   }
@@ -900,10 +947,8 @@
   document.addEventListener('click', (e)=>{
     const act = e.target.getAttribute && e.target.getAttribute('data-act');
     if(!act) return;
-    if(act==='all-st') state.activeStations = new Set(STATION_KEYS);
-    if(act==='none-st') state.activeStations = new Set();
-    if(act==='all-dsp') state.activeDsps = new Set(DSP_KEYS);
-    if(act==='none-dsp') state.activeDsps = new Set();
+    if(act==='all-st' || act==='none-st') state.activeStations = new Set();
+    if(act==='all-dsp' || act==='none-dsp') state.activeDsps = new Set();
     refreshAll();
   });
 
@@ -925,8 +970,8 @@
 
   // ---------- Reset ----------
   document.getElementById('resetbtn').addEventListener('click', ()=>{
-    state.activeStations = new Set(STATION_KEYS);
-    state.activeDsps = new Set(DSP_KEYS);
+    state.activeStations = new Set();
+    state.activeDsps = new Set();
     map.flyTo([39.4,-121.5], 6, {duration:0.6});
     highlightLayer.clearLayers();
     refreshAll();
